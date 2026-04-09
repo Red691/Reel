@@ -478,7 +478,7 @@ async def handle_ig_username(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['temp_ig_username'] = username
     
     await update.message.reply_text(
-        f"Username: `{username}`\n\nNow send the password:`,
+        f"Username: `{username}`\n\nNow send the password:",
         parse_mode='Markdown'
     )
     return ADD_IG_PASSWORD
