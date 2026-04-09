@@ -548,15 +548,14 @@ def main():
     
     application = Application.builder().token(Config.BOT_TOKEN).build()
     
-    # Initialize scheduler with app context
-    global scheduler
+    # Initialize scheduler with app context - AB SAHI TAREEKA
     from scheduler import scheduler as sched
-    global scheduler
-    scheduler = sched
-    scheduler.app = application
-    scheduler.start()
+    sched.init_app(application)  # Pehle app set karo
+    sched.start()  # Phir start karo
     
-    # Main conversation handler
+    logger.info("Bot initialized successfully")
+    
+    # Conversation handler (same as before)
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -595,8 +594,8 @@ def main():
     application.add_handler(conv_handler)
     
     # Start the Bot
-    logger.info("Starting ReelBot Pro...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Starting ReelBot Pro with polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
