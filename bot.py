@@ -533,12 +533,11 @@ async def handle_tg_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.clear_user_state(user_id)
     return MAIN_MENU
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel conversation"""
-    user_id = update.effective_user.id
-    db.clear_user_state(user_id)
-    await update.message.reply_text("❌ Cancelled.", reply_markup=get_main_keyboard())
-    return ConversationHandler.END
+async def post_init(application: Application):
+    """Startup hook - yahan event loop chal raha hota hai"""
+    from scheduler import scheduler as sched
+    await sched.start_scheduler()
+    logger.info("Bot startup complete!")
 
 def main():
     """Start the bot"""
@@ -546,16 +545,19 @@ def main():
         logger.error("No BOT_TOKEN found in .env")
         return
     
-    application = Application.builder().token(Config.BOT_TOKEN).build()
+    # Build application with post_init hook
+    application = (
+        Application.builder()
+        .token(Config.BOT_TOKEN)
+        .post_init(post_init)  # Yeh important hai!
+        .build()
+    )
     
-    # Initialize scheduler with app context - AB SAHI TAREEKA
+    # Initialize scheduler with app reference
     from scheduler import scheduler as sched
-    sched.init_app(application)  # Pehle app set karo
-    sched.start()  # Phir start karo
+    sched.init_app(application)
     
-    logger.info("Bot initialized successfully")
-    
-    # Conversation handler (same as before)
+    # Conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -593,9 +595,12 @@ def main():
     
     application.add_handler(conv_handler)
     
-    # Start the Bot
-    logger.info("Starting ReelBot Pro with polling...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Start polling (yahan event loop start hota hai)
+    logger.info("Starting ReelBot Pro...")
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
 
 if __name__ == '__main__':
     main()
