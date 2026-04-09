@@ -11,7 +11,6 @@ from config import Config, TEMP_DIR
 from database import db
 from downloader import downloader
 from instagram_manager import ig_manager
-from scheduler import PostScheduler
 
 # Enable logging
 logging.basicConfig(
@@ -25,7 +24,8 @@ logger = logging.getLogger(__name__)
  SELECT_PLATFORM, SELECT_ACCOUNT, SCHEDULE_OR_POST, SET_SCHEDULE_TIME,
  ADD_IG_ACCOUNT, ADD_IG_PASSWORD) = range(10)
 
-# Helper functions
+# ==================== HELPER FUNCTIONS ====================
+
 def is_admin(user_id: int) -> bool:
     return not Config.ADMIN_USER_IDS or user_id in Config.ADMIN_USER_IDS
 
@@ -38,6 +38,8 @@ def get_main_keyboard():
         [InlineKeyboardButton("📅 Scheduled Jobs", callback_data='list_jobs')]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+# ==================== COMMAND HANDLERS ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message"""
@@ -64,6 +66,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
     return MAIN_MENU
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel conversation"""
+    user_id = update.effective_user.id
+    db.clear_user_state(user_id)
+    
+    # Cleanup any temp data
+    if 'current_post' in context.user_data:
+        if 'file_path' in context.user_data['current_post']:
+            downloader.cleanup(context.user_data['current_post']['file_path'])
+        context.user_data.clear()
+    
+    await update.message.reply_text(
+        "❌ Cancelled. Back to main menu:", 
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+# ==================== CALLBACK HANDLERS ====================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button clicks"""
@@ -168,7 +189,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📅 No scheduled jobs found."
         else:
             text = "*Your Scheduled Jobs:*\n\n"
-            for job in jobs[:10]:  # Show last 10
+            for job in jobs[:10]:
                 status_emoji = "⏳" if job.status == 'pending' else "✅" if job.status == 'completed' else "❌"
                 date_str = job.scheduled_time.strftime("%d/%m %H:%M")
                 text += f"{status_emoji} `{date_str}` → {job.platform}: {job.target_account}\n"
@@ -188,13 +209,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
     
     elif data.startswith('select_'):
-        # Handle account selection
         parts = data.split('_', 2)
         if len(parts) >= 3:
             platform = parts[1]
             account = parts[2]
             
-            # Store in user data
             if 'current_post' not in context.user_data:
                 context.user_data['current_post'] = {}
             
@@ -221,14 +240,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SET_SCHEDULE_TIME
     
     elif data == 'edit_caption':
+        current_caption = context.user_data.get('current_post', {}).get('caption', 'None')
         await query.edit_message_text(
-            "✏️ Send new caption for the video:\n\n"
-            "Current: " + context.user_data.get('current_post', {}).get('caption', 'None')[:100],
+            f"✏️ Send new caption for the video:\n\n"
+            f"Current: `{current_caption[:100]}`",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data='back_main')
             ]])
         )
         return EDIT_CAPTION
+
+# ==================== MESSAGE HANDLERS ====================
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process YouTube/Instagram link"""
@@ -242,7 +265,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return MAIN_MENU
     
-    # Download video
     status_msg = await update.message.reply_text("⏳ Downloading video...")
     
     success, msg, file_path = downloader.download(url)
@@ -251,11 +273,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"{msg}\n\nTry again:", reply_markup=get_main_keyboard())
         return MAIN_MENU
     
-    # Get video info for caption
     info = downloader.extract_info(url)
     default_caption = f"📹 {info['title']}\n\nVia @ReelBotPro" if info else "Via @ReelBotPro"
     
-    # Store in context
     context.user_data['current_post'] = {
         'file_path': file_path,
         'caption': default_caption,
@@ -263,8 +283,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     
     await status_msg.delete()
-    
-    # Show account selection
     await show_account_selection(update, context)
     return SELECT_ACCOUNT
 
@@ -272,13 +290,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle uploaded video file"""
     user_id = update.effective_user.id
     
-    # Check file size
     file = update.message.video or update.message.document
     if not file:
         await update.message.reply_text("❌ Please send a valid video file.")
         return WAITING_FOR_FILE
     
-    # Download file
     status_msg = await update.message.reply_text("⏳ Downloading file...")
     
     try:
@@ -307,20 +323,124 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("❌ Failed to download file. Try again.")
         return WAITING_FOR_FILE
 
+async def handle_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update caption"""
+    new_caption = update.message.text
+    context.user_data['current_post']['caption'] = new_caption
+    
+    await update.message.reply_text("✅ Caption updated!")
+    
+    # Show post options again
+    query = update.message.reply_text(
+        "Processing...",
+        reply_markup=InlineKeyboardMarkup([])
+    )
+    # Create fake update for show_post_options
+    class FakeUpdate:
+        def __init__(self, msg):
+            self.callback_query = type('obj', (object,), {
+                'edit_message_text': msg.edit_text,
+                'answer': lambda: None
+            })()
+    
+    fake = FakeUpdate(query)
+    await show_post_options(fake, context)
+    return SCHEDULE_OR_POST
+
+async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Parse schedule time"""
+    text = update.message.text.strip()
+    
+    try:
+        schedule_time = datetime.strptime(text, "%d/%m/%Y %H:%M")
+        
+        if schedule_time < datetime.now():
+            await update.message.reply_text("❌ Time must be in the future!")
+            return SET_SCHEDULE_TIME
+        
+        await process_post(update, context, immediate=False, schedule_time=schedule_time)
+        return ConversationHandler.END
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid format! Use: DD/MM/YYYY HH:MM\nExample: 15/04/2026 14:30"
+        )
+        return SET_SCHEDULE_TIME
+
+async def handle_ig_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store IG username and ask for password"""
+    username = update.message.text.strip()
+    context.user_data['temp_ig_username'] = username
+    
+    await update.message.reply_text(
+        f"Username: `{username}`\n\nNow send the password:",
+        parse_mode='Markdown'
+    )
+    return ADD_IG_PASSWORD
+
+async def handle_ig_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Login to Instagram"""
+    password = update.message.text
+    username = context.user_data.get('temp_ig_username')
+    user_id = update.effective_user.id
+    
+    status_msg = await update.message.reply_text("⏳ Logging in to Instagram...")
+    
+    success, msg = ig_manager.add_account(username, password)
+    
+    if success:
+        db.add_account(user_id, 'instagram', username, {'username': username})
+    
+    await status_msg.edit_text(msg, reply_markup=get_main_keyboard())
+    db.clear_user_state(user_id)
+    return MAIN_MENU
+
+async def handle_tg_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add Telegram channel"""
+    channel = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    test_msg = await update.message.reply_text("⏳ Testing channel access...")
+    
+    try:
+        chat = await context.bot.get_chat(channel)
+        db.add_account(user_id, 'telegram', channel, {'channel_id': chat.id})
+        await test_msg.edit_text(
+            f"✅ Channel added successfully!\n\n"
+            f"Name: {chat.title}\n"
+            f"ID: `{chat.id}`",
+            reply_markup=get_main_keyboard(),
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await test_msg.edit_text(
+            f"❌ Failed to access channel.\n\n"
+            f"Error: `{str(e)}`\n\n"
+            f"Make sure:\n"
+            f"1. Bot is admin in the channel\n"
+            f"2. You used correct format (@channel or -100xxx)",
+            reply_markup=get_main_keyboard(),
+            parse_mode='Markdown'
+        )
+    
+    db.clear_user_state(user_id)
+    return MAIN_MENU
+
+# ==================== UI HELPERS ====================
+
 async def show_account_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available accounts to post to"""
     user_id = update.effective_user.id
     accounts = db.get_user_accounts(user_id)
     
     if not accounts:
-        await update.message.reply_text(
-            "⚠️ No accounts configured!\n\n"
-            "Add accounts first using the menu below:",
-            reply_markup=get_main_keyboard()
-        )
+        msg = "⚠️ No accounts configured!\n\nAdd accounts first:"
+        if update.message:
+            await update.message.reply_text(msg, reply_markup=get_main_keyboard())
+        else:
+            await update.callback_query.edit_message_text(msg, reply_markup=get_main_keyboard())
         return MAIN_MENU
     
-    # Build keyboard with accounts
     keyboard = []
     for acc in accounts:
         emoji = "📱" if acc.platform == 'instagram' else "💬"
@@ -371,35 +491,6 @@ async def show_post_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def handle_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Update caption"""
-    new_caption = update.message.text
-    context.user_data['current_post']['caption'] = new_caption
-    
-    await update.message.reply_text("✅ Caption updated!")
-    await show_post_options(update, context)
-    return SCHEDULE_OR_POST
-
-async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Parse schedule time"""
-    text = update.message.text.strip()
-    
-    try:
-        schedule_time = datetime.strptime(text, "%d/%m/%Y %H:%M")
-        
-        if schedule_time < datetime.now():
-            await update.message.reply_text("❌ Time must be in the future!")
-            return SET_SCHEDULE_TIME
-        
-        await process_post(update, context, immediate=False, schedule_time=schedule_time)
-        return ConversationHandler.END
-        
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Invalid format! Use: DD/MM/YYYY HH:MM\nExample: 15/04/2026 14:30"
-        )
-        return SET_SCHEDULE_TIME
-
 async def process_post(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                       immediate: bool, schedule_time: datetime = None):
     """Process the final posting"""
@@ -416,14 +507,12 @@ async def process_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     
     if immediate:
-        # Post immediately
         status_msg = await update.message.reply_text("⏳ Posting...")
         
         try:
             if platform == 'instagram':
                 success, msg = ig_manager.upload_video(account, file_path, caption)
             else:
-                # Telegram
                 success = await send_telegram_video(context, account, file_path, caption)
                 msg = "Posted successfully!" if success else "Failed to post"
             
@@ -437,7 +526,6 @@ async def process_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.error(f"Post error: {e}")
             await status_msg.edit_text(f"❌ Error: {str(e)}")
     else:
-        # Schedule it
         from scheduler import scheduler
         job_id = scheduler.schedule_job(
             user_id, platform, account, file_path, caption, schedule_time
@@ -471,73 +559,15 @@ async def send_telegram_video(context, channel_id: str, file_path: str, caption:
         logger.error(f"Telegram send error: {e}")
         return False
 
-# Account addition handlers
-async def handle_ig_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store IG username and ask for password"""
-    username = update.message.text.strip()
-    context.user_data['temp_ig_username'] = username
-    
-    await update.message.reply_text(
-        f"Username: `{username}`\n\nNow send the password:",
-        parse_mode='Markdown'
-    )
-    return ADD_IG_PASSWORD
-
-async def handle_ig_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Login to Instagram"""
-    password = update.message.text
-    username = context.user_data.get('temp_ig_username')
-    user_id = update.effective_user.id
-    
-    status_msg = await update.message.reply_text("⏳ Logging in to Instagram...")
-    
-    success, msg = ig_manager.add_account(username, password)
-    
-    if success:
-        # Save to DB
-        db.add_account(user_id, 'instagram', username, {'username': username})
-    
-    await status_msg.edit_text(msg, reply_markup=get_main_keyboard())
-    db.clear_user_state(user_id)
-    return MAIN_MENU
-
-async def handle_tg_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add Telegram channel"""
-    channel = update.message.text.strip()
-    user_id = update.effective_user.id
-    
-    # Test if bot can access channel
-    test_msg = await update.message.reply_text("⏳ Testing channel access...")
-    
-    try:
-        chat = await context.bot.get_chat(channel)
-        db.add_account(user_id, 'telegram', channel, {'channel_id': chat.id})
-        await test_msg.edit_text(
-            f"✅ Channel added successfully!\n\n"
-            f"Name: {chat.title}\n"
-            f"ID: `{chat.id}`",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        await test_msg.edit_text(
-            f"❌ Failed to access channel.\n\n"
-            f"Error: `{str(e)}`\n\n"
-            f"Make sure:\n"
-            f"1. Bot is admin in the channel\n"
-            f"2. You used correct format (@channel or -100xxx)",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
-    
-    db.clear_user_state(user_id)
-    return MAIN_MENU
+# ==================== SCHEDULER HOOK ====================
 
 async def post_init(application: Application):
-    """Startup hook - yahan event loop chal raha hota hai"""
+    """Startup hook"""
     from scheduler import scheduler as sched
     await sched.start_scheduler()
     logger.info("Bot startup complete!")
+
+# ==================== MAIN ====================
 
 def main():
     """Start the bot"""
@@ -545,19 +575,16 @@ def main():
         logger.error("No BOT_TOKEN found in .env")
         return
     
-    # Build application with post_init hook
     application = (
         Application.builder()
         .token(Config.BOT_TOKEN)
-        .post_init(post_init)  # Yeh important hai!
+        .post_init(post_init)
         .build()
     )
     
-    # Initialize scheduler with app reference
     from scheduler import scheduler as sched
     sched.init_app(application)
     
-    # Conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -595,7 +622,6 @@ def main():
     
     application.add_handler(conv_handler)
     
-    # Start polling (yahan event loop start hota hai)
     logger.info("Starting ReelBot Pro...")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
