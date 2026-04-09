@@ -13,15 +13,26 @@ logger = logging.getLogger(__name__)
 class PostScheduler:
     def __init__(self):
         self.app = None
-        self.scheduler = AsyncIOScheduler()
+        self.scheduler = None  # Pehle None, baad mein create hoga
         self.is_running = False
     
     def init_app(self, application):
         """Initialize with telegram app"""
         self.app = application
+        
+        # Event loop available hone ke baad scheduler create karo
+        try:
+            loop = asyncio.get_running_loop()
+            self.scheduler = AsyncIOScheduler(event_loop=loop)
+        except RuntimeError:
+            # Agar loop nahi hai toh default le lo
+            self.scheduler = AsyncIOScheduler()
     
-    def start(self):
-        """Start the background scheduler"""
+    async def start_scheduler(self):
+        """Async method to start scheduler (call this after event loop starts)"""
+        if not self.scheduler:
+            self.scheduler = AsyncIOScheduler()
+        
         if not self.is_running and self.app:
             self.scheduler.add_job(
                 self._check_pending_jobs,
@@ -31,11 +42,11 @@ class PostScheduler:
             )
             self.scheduler.start()
             self.is_running = True
-            logger.info("Scheduler started")
+            logger.info("Scheduler started successfully")
     
     def stop(self):
         """Stop the scheduler"""
-        if self.is_running:
+        if self.is_running and self.scheduler:
             self.scheduler.shutdown()
             self.is_running = False
     
@@ -45,7 +56,8 @@ class PostScheduler:
             return
             
         jobs = db.get_pending_jobs()
-        logger.info(f"Checking {len(jobs)} pending jobs")
+        if jobs:
+            logger.info(f"Found {len(jobs)} pending jobs")
         
         for job in jobs:
             logger.info(f"Processing job {job.id} for {job.target_account}")
@@ -65,11 +77,9 @@ class PostScheduler:
                     )
                     msg = "Posted successfully" if success else "Failed to post"
                 
-                # Update status
                 status = 'completed' if success else 'failed'
                 db.update_job_status(job.id, status, None if success else msg)
                 
-                # Cleanup file
                 if success:
                     downloader.cleanup(job.video_path)
                     
@@ -94,5 +104,5 @@ class PostScheduler:
             logger.error(f"Telegram post error: {e}")
             return False
 
-# Global instance - yeh pehle None nahi hai, properly instantiated hai
+# Global instance
 scheduler = PostScheduler()
