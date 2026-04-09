@@ -1,10 +1,9 @@
-# scheduler.py
 import asyncio
 import logging
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from database import db, ScheduledJob
+from database import db
 from instagram_manager import ig_manager
 from downloader import downloader
 from pathlib import Path
@@ -12,14 +11,18 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class PostScheduler:
-    def __init__(self, telegram_app):
-        self.app = telegram_app
+    def __init__(self):
+        self.app = None
         self.scheduler = AsyncIOScheduler()
         self.is_running = False
     
+    def init_app(self, application):
+        """Initialize with telegram app"""
+        self.app = application
+    
     def start(self):
         """Start the background scheduler"""
-        if not self.is_running:
+        if not self.is_running and self.app:
             self.scheduler.add_job(
                 self._check_pending_jobs,
                 IntervalTrigger(seconds=30),
@@ -38,7 +41,11 @@ class PostScheduler:
     
     async def _check_pending_jobs(self):
         """Check and execute pending jobs"""
+        if not self.app:
+            return
+            
         jobs = db.get_pending_jobs()
+        logger.info(f"Checking {len(jobs)} pending jobs")
         
         for job in jobs:
             logger.info(f"Processing job {job.id} for {job.target_account}")
@@ -63,7 +70,7 @@ class PostScheduler:
                 db.update_job_status(job.id, status, None if success else msg)
                 
                 # Cleanup file
-                if success or not Path(job.video_path).exists():
+                if success:
                     downloader.cleanup(job.video_path)
                     
                 logger.info(f"Job {job.id} completed: {status}")
@@ -86,10 +93,6 @@ class PostScheduler:
         except Exception as e:
             logger.error(f"Telegram post error: {e}")
             return False
-    
-    def schedule_job(self, user_id: int, platform: str, target: str, 
-                    video_path: str, caption: str, schedule_time: datetime) -> int:
-        """Add job to database"""
-        return db.add_job(user_id, platform, target, video_path, caption, schedule_time)
 
-scheduler = None  # Initialized in bot.py with app context
+# Global instance - yeh pehle None nahi hai, properly instantiated hai
+scheduler = PostScheduler()
